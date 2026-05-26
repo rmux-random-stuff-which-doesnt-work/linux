@@ -17,8 +17,6 @@
 #include "ahci.h"
 #include "ahci_salina_phy.h"
 
-#define SALINA_AHCI_ABAR	5
-#define SALINA_PORT0_OFF	0x100
 #define SALINA_CHIP_ID_REG	0x4000
 
 struct salina_ahci {
@@ -76,18 +74,22 @@ static void salina_glue_unmap(struct salina_ahci *sa)
 	}
 }
 
-static int salina_bringup(struct salina_ahci *sa, struct pci_dev *pdev)
+static int salina_pick_bar(u16 devid, u32 chip_id, unsigned int *abar,
+			   u32 *port_off)
 {
-	sa->phy.devid = (pdev->device << 16) | pdev->vendor;
-	sa->phy.chip_id = readl(sa->phy.glue_pcs + SALINA_CHIP_ID_REG) & 0xff0000;
+	bool is_9106 = (devid == SALINA_SATA_ID_B);
 
-	if (sa->phy.chip_id != SALINA_CHIP_SALINA &&
-	    sa->phy.chip_id != SALINA_CHIP_SALINA2) {
-		dev_err(&pdev->dev, "unknown subsystem id %#x\n", sa->phy.chip_id);
+	if (!is_9106 && chip_id == SALINA_CHIP_SALINA2)
 		return -ENODEV;
-	}
 
-	return salina_sata_phy_init(&sa->phy);
+	if (is_9106) {
+		*abar = 0;
+		*port_off = 0x2000;
+	} else {
+		*abar = 5;
+		*port_off = 0;
+	}
+	return 0;
 }
 
 static struct ata_port_operations salina_ahci_ops = {
@@ -112,14 +114,11 @@ static int salina_ahci_probe(struct pci_dev *pdev, const struct pci_device_id *i
 	struct ahci_host_priv *hpriv;
 	struct ata_host *host;
 	struct salina_ahci *sa;
-	unsigned int n_ports;
+	unsigned int abar, n_ports;
+	u32 chip_id;
 	int rc;
 
 	rc = pcim_enable_device(pdev);
-	if (rc)
-		return rc;
-
-	rc = pcim_iomap_regions(pdev, BIT(SALINA_AHCI_ABAR), KBUILD_MODNAME);
 	if (rc)
 		return rc;
 
@@ -133,21 +132,41 @@ static int salina_ahci_probe(struct pci_dev *pdev, const struct pci_device_id *i
 	if (!sa)
 		return -ENOMEM;
 
-	sa->phy.ctrl		= pcim_iomap_table(pdev)[SALINA_AHCI_ABAR];
-	sa->phy.port_off	= SALINA_PORT0_OFF;
-	sa->phy.is_bd		= true;
-	sa->phy.rx_tracelen	= 0xff;
-	sa->phy.tx_tracelen	= 0xff;
-
 	rc = salina_glue_map(sa);
 	if (rc) {
 		dev_err(dev, "glue (104d:9107) map failed: %d\n", rc);
 		return rc;
 	}
 
-	rc = salina_bringup(sa, pdev);
+	chip_id = readl(sa->phy.glue_pcs + SALINA_CHIP_ID_REG) & 0xff0000;
+	if (chip_id != SALINA_CHIP_SALINA && chip_id != SALINA_CHIP_SALINA2) {
+		dev_err(dev, "unknown Salina chip id %#x\n", chip_id);
+		rc = -ENODEV;
+		goto err_glue;
+	}
+
+	rc = salina_pick_bar(pdev->device, chip_id, &abar, &sa->phy.port_off);
 	if (rc) {
-		dev_err(dev, "Salina SATA PHY bringup failed: %d\n", rc);
+		dev_info(dev, "SALINA2 SATA0 dummy device, claiming but not attaching\n");
+		pci_set_drvdata(pdev, NULL);
+		salina_glue_unmap(sa);
+		return 0;
+	}
+
+	rc = pcim_iomap_regions(pdev, BIT(abar), KBUILD_MODNAME);
+	if (rc)
+		goto err_glue;
+
+	sa->phy.ctrl		= pcim_iomap_table(pdev)[abar];
+	sa->phy.chip_id		= chip_id;
+	sa->phy.devid		= (pdev->device << 16) | pdev->vendor;
+	sa->phy.is_bd		= true;
+	sa->phy.rx_tracelen	= 0xff;
+	sa->phy.tx_tracelen	= 0xff;
+
+	rc = salina_sata_phy_init(&sa->phy);
+	if (rc) {
+		dev_err(dev, "Salina SATA PHY init failed: %d\n", rc);
 		goto err_glue;
 	}
 
@@ -157,7 +176,7 @@ static int salina_ahci_probe(struct pci_dev *pdev, const struct pci_device_id *i
 		goto err_glue;
 	}
 
-	hpriv->mmio = sa->phy.ctrl;
+	hpriv->mmio = sa->phy.ctrl + sa->phy.port_off;
 	hpriv->plat_data = sa;
 	hpriv->flags = AHCI_HFLAG_NO_PMP;
 
@@ -184,8 +203,9 @@ static int salina_ahci_probe(struct pci_dev *pdev, const struct pci_device_id *i
 
 	pci_set_drvdata(pdev, host);
 
-	dev_info(dev, "Salina SATA up (chip %#x, devid %#x, %u ports)\n",
-		 sa->phy.chip_id, sa->phy.devid, n_ports);
+	dev_info(dev,
+		 "Salina SATA up (chip %#x, devid %#x, BAR%u, port_off %#x, %u ports)\n",
+		 sa->phy.chip_id, sa->phy.devid, abar, sa->phy.port_off, n_ports);
 
 	return ahci_host_activate(host, &salina_ahci_sht);
 
@@ -197,8 +217,14 @@ err_glue:
 static void salina_ahci_remove(struct pci_dev *pdev)
 {
 	struct ata_host *host = pci_get_drvdata(pdev);
-	struct ahci_host_priv *hpriv = host->private_data;
-	struct salina_ahci *sa = hpriv->plat_data;
+	struct ahci_host_priv *hpriv;
+	struct salina_ahci *sa;
+
+	if (!host)
+		return;
+
+	hpriv = host->private_data;
+	sa = hpriv->plat_data;
 
 	ata_host_detach(host);
 	salina_glue_unmap(sa);
@@ -209,10 +235,16 @@ static int salina_ahci_suspend(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct ata_host *host = pci_get_drvdata(pdev);
-	struct ahci_host_priv *hpriv = host->private_data;
-	void __iomem *mmio = hpriv->mmio;
+	struct ahci_host_priv *hpriv;
+	void __iomem *mmio;
 	u32 ctl;
 	int rc;
+
+	if (!host)
+		return 0;
+
+	hpriv = host->private_data;
+	mmio = hpriv->mmio;
 
 	ctl = readl(mmio + HOST_CTL);
 	ctl &= ~HOST_IRQ_EN;
@@ -232,9 +264,15 @@ static int salina_ahci_resume(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct ata_host *host = pci_get_drvdata(pdev);
-	struct ahci_host_priv *hpriv = host->private_data;
-	struct salina_ahci *sa = hpriv->plat_data;
+	struct ahci_host_priv *hpriv;
+	struct salina_ahci *sa;
 	int rc;
+
+	if (!host)
+		return 0;
+
+	hpriv = host->private_data;
+	sa = hpriv->plat_data;
 
 	rc = pci_set_power_state(pdev, PCI_D0);
 	if (rc)
