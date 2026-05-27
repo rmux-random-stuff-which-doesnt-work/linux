@@ -36,8 +36,10 @@ static void salina_bd_icc_power_on(struct device *dev)
 	m->data[1]	= 0x01;
 
 	rc = icc_query(q, r);
-	if (rc)
-		dev_warn(dev, "ICC BD power-on returned %d (drive may already be on)\n", rc);
+	if (rc == -ETIMEDOUT)
+		dev_info(dev, "BD drive already powered on\n");
+	else if (rc)
+		dev_warn(dev, "ICC BD power-on returned %d\n", rc);
 }
 
 struct salina_ahci {
