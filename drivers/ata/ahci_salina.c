@@ -207,6 +207,13 @@ static int salina_ahci_probe(struct pci_dev *pdev, const struct pci_device_id *i
 
 	ahci_save_initial_config(dev, hpriv);
 
+	rc = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI | PCI_IRQ_INTX);
+	if (rc < 0) {
+		dev_err(dev, "irq alloc failed: %d\n", rc);
+		goto err_glue;
+	}
+	hpriv->irq = pci_irq_vector(pdev, 0);
+
 	n_ports = max(ahci_nr_ports(hpriv->cap), fls(hpriv->port_map));
 
 	host = ata_host_alloc_pinfo(dev, ppi, n_ports);
@@ -252,6 +259,7 @@ static void salina_ahci_remove(struct pci_dev *pdev)
 	sa = hpriv->plat_data;
 
 	ata_host_detach(host);
+	pci_free_irq_vectors(pdev);
 	salina_glue_unmap(sa);
 }
 
