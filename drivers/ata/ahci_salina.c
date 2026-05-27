@@ -12,12 +12,35 @@
 #include <linux/dma-mapping.h>
 #include <linux/pm.h>
 #include <linux/libata.h>
+#include <linux/ps5.h>
 #include <scsi/scsi_host.h>
 
 #include "ahci.h"
 #include "ahci_salina_phy.h"
 
 #define SALINA_CHIP_ID_REG	0x4000
+
+#define SALINA_ICC_POWER_SVC	0x05
+#define SALINA_ICC_POWER_SET	0x00
+#define SALINA_ICC_DEV_BD	0x01
+
+static void salina_bd_icc_power_on(struct device *dev)
+{
+	u8 q[ICC_MSG_MAX_SIZE] = {0};
+	u8 r[ICC_MSG_MAX_SIZE] = {0};
+	struct icc_msg *m = (struct icc_msg *)q;
+	int rc;
+
+	m->service_id	= SALINA_ICC_POWER_SVC;
+	m->msg_type	= SALINA_ICC_POWER_SET;
+	m->length	= 0x20;
+	m->data[0]	= SALINA_ICC_DEV_BD;
+	m->data[1]	= 0x01;
+
+	rc = icc_query(q, r);
+	if (rc)
+		dev_warn(dev, "ICC BD power-on returned %d (drive may already be on)\n", rc);
+}
 
 struct salina_ahci {
 	struct salina_sata_phy	phy;
@@ -163,6 +186,8 @@ static int salina_ahci_probe(struct pci_dev *pdev, const struct pci_device_id *i
 	sa->phy.is_bd		= true;
 	sa->phy.rx_tracelen	= 0xff;
 	sa->phy.tx_tracelen	= 0xff;
+
+	salina_bd_icc_power_on(dev);
 
 	rc = salina_sata_phy_init(&sa->phy);
 	if (rc) {
