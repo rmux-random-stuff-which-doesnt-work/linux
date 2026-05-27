@@ -18,8 +18,6 @@
 #include "ahci.h"
 #include "ahci_salina_phy.h"
 
-#define SALINA_CHIP_ID_REG	0x4000
-
 #define SALINA_ICC_POWER_SVC	0x05
 #define SALINA_ICC_POWER_SET	0x00
 #define SALINA_ICC_DEV_BD	0x01
@@ -141,6 +139,11 @@ static int salina_ahci_probe(struct pci_dev *pdev, const struct pci_device_id *i
 	u32 chip_id;
 	int rc;
 
+	if (!spcie_is_initialized()) {
+		dev_warn(dev, "spcie not initialized yet, deferring\n");
+		return -EPROBE_DEFER;
+	}
+
 	rc = pcim_enable_device(pdev);
 	if (rc)
 		return rc;
@@ -161,7 +164,7 @@ static int salina_ahci_probe(struct pci_dev *pdev, const struct pci_device_id *i
 		return rc;
 	}
 
-	chip_id = readl(sa->phy.glue_pcs + SALINA_CHIP_ID_REG) & 0xff0000;
+	chip_id = spcie_get_chip_id();
 	if (chip_id != SALINA_CHIP_SALINA && chip_id != SALINA_CHIP_SALINA2) {
 		dev_err(dev, "unknown Salina chip id %#x\n", chip_id);
 		rc = -ENODEV;
