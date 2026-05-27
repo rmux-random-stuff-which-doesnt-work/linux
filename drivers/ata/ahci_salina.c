@@ -103,13 +103,8 @@ static int salina_pick_bar(u16 devid, u32 chip_id, unsigned int *abar,
 	if (!is_9106 && chip_id == SALINA_CHIP_SALINA2)
 		return -ENODEV;
 
-	if (is_9106) {
-		*abar = 0;
-		*port_off = 0x2000;
-	} else {
-		*abar = 5;
-		*port_off = 0;
-	}
+	*abar = 0;
+	*port_off = is_9106 ? 0x2000 : 0;
 	return 0;
 }
 
